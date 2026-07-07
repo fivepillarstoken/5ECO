@@ -57,13 +57,13 @@ contract MiningEmission is ReentrancyGuard, Ownable2Step {
     IERC20 public immutable fivePT;
     /// @notice External investment manager where funds are being burned.
     IInvestmentManager public immutable investmentManager;
-    /// @notice Emission start timestamp.
-    uint256 public immutable startTimestamp;
-    /// @notice Emission finish timestamp.
-    uint256 public immutable finishTimestamp;
 
     /// @notice Per-account emission state.
     mapping(address => AccountInfo) public accountInfo;
+    /// @notice Emission start timestamp.
+    uint256 public startTimestamp;
+    /// @notice Emission finish timestamp.
+    uint256 public finishTimestamp;
     /// @notice Total burned `fivePT` across all participants.
     uint256 public totalBurned;
     /// @notice Total `fiveECO` rewards allocated to be distributed over `DURATION`.
@@ -135,9 +135,6 @@ contract MiningEmission is ReentrancyGuard, Ownable2Step {
 
         fivePT = _fivePT;
         investmentManager = _investmentManager;
-        startTimestamp = block.timestamp;
-        updatedAt = block.timestamp;
-        finishTimestamp = block.timestamp + DURATION;
     }
 
     /// @notice Sets `fiveECO` token contract used for reward transfers.
@@ -149,6 +146,9 @@ contract MiningEmission is ReentrancyGuard, Ownable2Step {
         if (_fiveECO.balanceOf(address(this)) < TOTAL_REWARD) revert InsufficientRewardBalance();
 
         fiveECO = _fiveECO;
+        startTimestamp = block.timestamp;
+        updatedAt = block.timestamp;
+        finishTimestamp = block.timestamp + DURATION;
 
         emit FiveECOSet(address(_fiveECO));
     }
@@ -200,7 +200,11 @@ contract MiningEmission is ReentrancyGuard, Ownable2Step {
         emit FivePTBurned(msg.sender, amount);
 
         IInvestmentManager.InvestorInfo memory investorInfo = investmentManager.accountToInvestorInfo(address(this));
-        if (investorInfo.lastDepositTimestamp + investmentManager.depositDelay() > block.timestamp) {
+        if (
+            investorInfo.lastDepositTimestamp + investmentManager.depositDelay() > block.timestamp ||
+            investmentManager.isUpdateCriteriaActive() ||
+            (investorInfo.totalDeposit == 0 && amount < 10 ** 18)
+        ) {
             amountWaitingToBurn += amount;
 
             emit AmountWaitingToBurnIncreased(amount);
