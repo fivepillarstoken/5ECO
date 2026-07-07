@@ -22,4 +22,5 @@ interface IInvestmentManager {
     function depositDelay() external view returns (uint256);
     function accountToInvestorInfo(address account) external view returns (InvestorInfo memory);
     function deposit(uint256 amount, address referer) external;
+    function isUpdateCriteriaActive() external view returns (bool);
 }
