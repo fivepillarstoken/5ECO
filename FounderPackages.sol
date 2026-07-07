@@ -67,6 +67,18 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     error NoAmountToBurn();
     /// @notice Thrown when a withdraw schedule has no amount to release.
     error NoAmountToRelease();
+    /// @notice Thrown when the deadline is in the past.
+    error InvalidDeadline();
+    /// @notice Thrown when the USDT amount is greater than the maximum allowed.
+    error AmountUsdtMaxExeeded();
+    /// @notice Thrown when the fiveECO amount is less than the minimum allowed.
+    error InsufficientFiveEcoAmount();
+    /// @notice Thrown when the start package index is out of range.
+    error InvalidStartPackageIndex();
+    /// @notice Thrown when the packages count in withdraw is out of range.
+    error InvalidPackagesCountInWithdraw();
+    /// @notice Thrown when the start phase id is out of range.
+    error InvalidStartPhaseId();
 
     /// @notice Basis points denominator (100% = 10_000).
     uint256 public constant PCT_BASE = 10000;
@@ -84,8 +96,6 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
 
     /// @notice Id assigned to the next phase created via `createPhase`.
     uint256 public nextPhaseId;
-    /// @notice Linear vesting duration after the lock period ends.
-    uint256 public withdrawDuration;
     /// @notice Wallet that receives USDT payments from purchases.
     address public usdtReceiver;
     /// @notice Lock period options in seconds (1, 2, and 3 years).
@@ -136,6 +146,8 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
         uint256 startTime;
         /// @notice Phase length in seconds.
         uint256 duration;
+        /// @notice Linear vesting duration after lock period ends.
+        uint256 withdrawDuration;
         /// @notice Lock multipliers per `LOCK_PERIODS` entry, in basis points.
         uint256[LOCK_PERIODS_COUNT] lockFactors;
     }
@@ -143,9 +155,6 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     /// @notice Emitted when the USDT receiver address is updated.
     /// @param usdtReceiver New receiver address.
     event UsdtReceiverSetted(address usdtReceiver);
-    /// @notice Emitted when the post-lock vesting duration is updated.
-    /// @param withdrawDuration New vesting duration in seconds.
-    event WithdrawDurationSetted(uint256 withdrawDuration);
     /// @notice Emitted when a new sale phase is created.
     /// @param phaseId Id of the created phase.
     event PhaseCreated(uint256 phaseId);
@@ -196,12 +205,10 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     /// @param fiveEcoAddress Address of the `fiveECO` token used as phase collateral.
     /// @param usdtAddress Address of the USDT payment token.
     /// @param _usdtReceiver Wallet that receives USDT from purchases.
-    /// @param _withdrawDuration Linear vesting duration after lock (4–12 weeks).
     constructor(
         address fiveEcoAddress,
         address usdtAddress,
-        address _usdtReceiver,
-        uint256 _withdrawDuration
+        address _usdtReceiver
     ) Ownable(msg.sender) {
         if (
             fiveEcoAddress == address(0) ||
@@ -211,7 +218,6 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
         fiveEco = IERC20Burnable(fiveEcoAddress);
         usdt = IERC20(usdtAddress);
         _setUsdtReceiver(_usdtReceiver);
-        _setWithdrawDuration(_withdrawDuration);
     }
 
     /// @notice Returns the number of vesting schedules for an account.
@@ -263,12 +269,6 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     /// @param _usdtReceiver New receiver address.
     function setUsdtReceiver(address _usdtReceiver) external onlyOwner {
         _setUsdtReceiver(_usdtReceiver);
-    }
-
-    /// @notice Updates the linear vesting duration applied to new purchases.
-    /// @param _withdrawDuration New duration in seconds (4–12 weeks).
-    function setWithdrawDuration(uint256 _withdrawDuration) external onlyOwner {
-        _setWithdrawDuration(_withdrawDuration);
     }
 
     /// @notice Creates a new sale phase and pulls `fiveECO` collateral from the owner.
@@ -350,15 +350,21 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     /// @notice Withdraws unsold `fiveECO` collateral for all package tiers after a phase ends.
     /// @dev Marks each package tier as fully sold to prevent double withdrawal.
     /// @param phaseId Id of the ended phase.
+    /// @param startPackageIndex Index of the first package tier to withdraw.
+    /// @param packagesCount Number of package tiers to withdraw from `startPackageIndex`.
     function withdrawFromPhase(
-        uint256 phaseId
+        uint256 phaseId,
+        uint256 startPackageIndex,
+        uint256 packagesCount
     ) external onlyOwner nonReentrant {
         if (phaseId >= nextPhaseId) revert InvalidPhaseId();
+        if (startPackageIndex >= _phaseIdToPackagesInfo[phaseId].length) revert InvalidStartPackageIndex();
+        if (startPackageIndex + packagesCount > _phaseIdToPackagesInfo[phaseId].length) revert InvalidPackagesCountInWithdraw();
         PhaseInfo memory phase = _phaseIdToPhaseInfo[phaseId];
         if (phase.startTime + phase.duration > block.timestamp) revert PhaseNotEnded();
         uint256 totalAvailableAmount = 0;
         PackageInfo[] memory packages = _phaseIdToPackagesInfo[phaseId];
-        for (uint256 i = 0; i < packages.length; i++) {
+        for (uint256 i = startPackageIndex; i < startPackageIndex + packagesCount; i++) {
             uint256 availableAmount = packages[i].poolCap - _phaseIdToPackageTypeToSoldAmount[phaseId][i];
             totalAvailableAmount += availableAmount;
             _phaseIdToPackageTypeToSoldAmount[phaseId][i] = packages[i].poolCap;
@@ -378,9 +384,14 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     function purchase(
         uint256 packageType,
         uint256 lockPeriod,
-        address refferer
+        address refferer,
+        uint256 amountUsdtMax,
+        uint256 amountFiveEcoMin,
+        uint256 deadline,
+        uint256 startPhaseId
     ) external nonReentrant {
-        uint256 activePhaseId = _getActivePhaseId();
+        if (deadline < block.timestamp) revert InvalidDeadline();
+        uint256 activePhaseId = _getActivePhaseId(startPhaseId);
         if (packageType >= _phaseIdToPackagesInfo[activePhaseId].length) revert InvalidPackageType();
         if (lockPeriod >= LOCK_PERIODS_COUNT) revert InvalidLockPeriod();
         PhaseInfo memory phase = _phaseIdToPhaseInfo[activePhaseId];
@@ -391,6 +402,7 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
         }
 
         uint256 usdtAmount = phase.price * package.quantity / 10 ** PRICE_DECIMALS;
+        if (usdtAmount > amountUsdtMax) revert AmountUsdtMaxExeeded();
         if (_accountToReferrer[msg.sender] != address(0)) {
             uint256 refFee = _distributeReferralFee(usdtAmount);
             usdtAmount -= refFee;
@@ -398,10 +410,11 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
         usdt.safeTransferFrom(msg.sender, usdtReceiver, usdtAmount);
 
         uint256 fiveEcoAmount = package.quantity * phase.lockFactors[lockPeriod] / PCT_BASE + package.quantity * package.bonus / PCT_BASE;
+        if (fiveEcoAmount < amountFiveEcoMin) revert InsufficientFiveEcoAmount();
         if (_phaseIdToPackageTypeToSoldAmount[activePhaseId][packageType] + fiveEcoAmount > package.poolCap) revert PackagePoolCapExeeded();
         _phaseIdToPackageTypeToSoldAmount[activePhaseId][packageType] += fiveEcoAmount;
 
-        _createWithdrawSchedule(msg.sender, fiveEcoAmount, LOCK_PERIODS[lockPeriod], withdrawDuration);
+        _createWithdrawSchedule(msg.sender, fiveEcoAmount, LOCK_PERIODS[lockPeriod], phase.withdrawDuration);
 
         emit Purchase(msg.sender, activePhaseId, packageType, lockPeriod, usdtAmount, fiveEcoAmount);
     }
@@ -480,22 +493,6 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
         emit UsdtReceiverSetted(_usdtReceiver);
     }
 
-    /// @dev Sets `withdrawDuration` after validating the allowed range.
-    /// @param _withdrawDuration New vesting duration in seconds.
-    function _setWithdrawDuration(
-        uint256 _withdrawDuration
-    ) private {
-        if (
-            _withdrawDuration < 4 weeks ||
-            _withdrawDuration > 12 weeks ||
-            _withdrawDuration % 1 weeks != 0
-        ) revert InvalidWithdrawDuration();
-
-        withdrawDuration = _withdrawDuration;
-
-        emit WithdrawDurationSetted(_withdrawDuration);
-    }
-
     /// @dev Validates phase timing, price, and lock factors for create/edit flows.
     /// @param phaseInfo Phase configuration to validate.
     /// @param onEditPhase Whether validation runs in the `editPhase` context.
@@ -513,6 +510,15 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
             phaseInfo.lockFactors[1] < PCT_BASE ||
             phaseInfo.lockFactors[2] < PCT_BASE
         ) revert InvalidLockFactor();
+        if (
+            phaseInfo.lockFactors[1] <= phaseInfo.lockFactors[0] ||
+            phaseInfo.lockFactors[2] <= phaseInfo.lockFactors[1]
+        ) revert InvalidLockFactor();
+        if (
+            phaseInfo.withdrawDuration < 4 weeks ||
+            phaseInfo.withdrawDuration > 12 weeks ||
+            phaseInfo.withdrawDuration % 1 weeks != 0
+        ) revert InvalidWithdrawDuration();
         if (onEditPhase) {
             if (_phaseIdToPhaseInfo[phaseId].startTime <= block.timestamp) revert PhaseAlreadyActiveOrEnded();
             if (phaseId > 0) {
@@ -553,10 +559,12 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
     }
 
     /// @dev Returns the id of the phase that is active at the current block timestamp.
+    /// @param startPhaseId Starting phase id to search from.
     /// @return phaseId Active phase id.
-    function _getActivePhaseId() private view returns (uint256 phaseId) {
+    function _getActivePhaseId(uint256 startPhaseId) private view returns (uint256 phaseId) {
         if (nextPhaseId == 0) revert NoPhaseCreatedYet();
-        phaseId = nextPhaseId;
+        if (startPhaseId >= nextPhaseId) revert InvalidStartPhaseId();
+        phaseId = startPhaseId == 0 ? nextPhaseId : startPhaseId + 1;
         while (true) {
             phaseId--;
             PhaseInfo memory phase = _phaseIdToPhaseInfo[phaseId];
@@ -643,10 +651,21 @@ contract FounderPackages is Ownable2Step, ReentrancyGuard {
         for (uint256 i = 0; i < REF_LEVEL_COUNT; i++) {
             if (referrer == address(0)) break;
             uint256 refFee = amount * REF_SYSTEM_FEES[i] / PCT_BASE;
-            totalRefFee += refFee;
             if (refFee > 0) {
-                usdt.safeTransferFrom(msg.sender, referrer, refFee);
-                emit RefFeePayed(msg.sender, referrer, refFee);
+                bool successtransfer = false;
+                totalRefFee += refFee;
+                try usdt.transferFrom(msg.sender, referrer, refFee) returns (bool success) {
+                    if (success) {
+                        successtransfer = true;
+                    }
+                } catch {
+                    successtransfer = false;
+                }
+                if (successtransfer) {
+                    emit RefFeePayed(msg.sender, referrer, refFee);
+                } else {
+                    totalRefFee -= refFee;
+                }
             }
 
             referrer = _accountToReferrer[referrer];
